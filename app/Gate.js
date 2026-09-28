@@ -37,9 +37,6 @@ export function Gate({ sitekey, lang, onOk }) {
     <div className="gate-ft">{g.by}</div>
   </div></div>;
 }
-export const useApp = () => useContext(Ctx);
-
-
 // เช็กว่าเบราว์เซอร์นี้ผ่านการตรวจบอตแล้วหรือยัง (undefined = กำลังเช็ก, true = ผ่าน/ไม่ต้องตรวจ, false = ต้องตรวจ)
 export function useHuman() {
   const [hv, setHv] = useState(undefined), [sk, setSk] = useState('');

@@ -5,6 +5,7 @@ import { usePathname } from 'next/navigation';
 import { Gate, useHuman } from './Gate';
 
 const Ctx = createContext(null);
+export const useApp = () => useContext(Ctx);
 const L = {
   th: {
     sub: 'ระบบแจกคีย์สำหรับชุมชน', tabs: ['สร้างหน้า', 'หน้าตัวอย่าง', 'แอดมิน'], login: 'เข้าสู่ระบบด้วย Discord', logout: 'ออกจากระบบ',
