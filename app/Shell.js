@@ -4,6 +4,40 @@ import Link from 'next/link';
 import { usePathname } from 'next/navigation';
 
 const Ctx = createContext(null);
+const G = {
+  th: { title: 'กำลังตรวจสอบว่าคุณไม่ใช่บอต', desc: 'เว็บไซต์นี้ตรวจสอบความปลอดภัยก่อนเข้าใช้งาน ใช้เวลาไม่กี่วินาที หน้านี้จะแสดงเฉพาะครั้งแรกที่เข้าเว็บ', wait: 'กำลังตรวจสอบ…', fail: 'ตรวจสอบไม่ผ่าน ลองอีกครั้ง', err: 'โหลดการตรวจสอบไม่สำเร็จ ลองรีเฟรชหน้านี้', by: 'ป้องกันโดย Cloudflare Turnstile' },
+  en: { title: 'Verifying you are human', desc: 'This site runs a quick security check before you enter. It only appears on your first visit.', wait: 'Verifying…', fail: 'Verification failed, please try again', err: 'Could not load the check, please refresh', by: 'Protected by Cloudflare Turnstile' },
+};
+// หน้าตรวจบอตครั้งแรก (เลย์เอาต์เหมือนหน้า interstitial ของ Cloudflare)
+function Gate({ sitekey, lang, onOk }) {
+  const box = useRef(null), [msg, setMsg] = useState(''), g = G[lang] || G.th;
+  useEffect(() => {
+    let dead = false, wid = null;
+    const draw = () => {
+      if (dead || !window.turnstile || !box.current || wid != null) return;
+      wid = window.turnstile.render(box.current, {
+        sitekey, theme: 'light',
+        callback: async token => {
+          setMsg(g.wait);
+          const j = await fetch('/api/human', { method: 'POST', body: JSON.stringify({ token }) }).then(r => r.json()).catch(() => ({}));
+          if (j.ok) onOk(); else { setMsg(g.fail); try { window.turnstile.reset(wid); } catch {} }
+        },
+        'error-callback': () => setMsg(g.err),
+      });
+    };
+    let sc = document.getElementById('cf-ts');
+    if (window.turnstile) draw();
+    else { if (!sc) { sc = document.createElement('script'); sc.id = 'cf-ts'; sc.src = 'https://challenges.cloudflare.com/turnstile/v0/api.js?render=explicit'; sc.async = true; document.head.appendChild(sc); } sc.addEventListener('load', draw); sc.addEventListener('error', () => setMsg(g.err)); }
+    return () => { dead = true; sc?.removeEventListener('load', draw); if (wid != null) { try { window.turnstile?.remove(wid); } catch {} } };
+  }, [sitekey]); // eslint-disable-line react-hooks/exhaustive-deps
+  return <div className="gate"><div className="gate-in">
+    <h1>{typeof location !== 'undefined' ? location.host : NAME}</h1>
+    <h2>{g.title}</h2><p>{g.desc}</p>
+    <div ref={box} className="gate-box" />
+    {msg && <p className="gate-msg">{msg}</p>}
+    <div className="gate-ft">{g.by}</div>
+  </div></div>;
+}
 export const useApp = () => useContext(Ctx);
 
 const L = {
@@ -27,7 +61,7 @@ const Door = () => <svg viewBox="0 0 26 24" width="19" height="19" fill="none" s
   <path d="M3 21h12M5 21V4a1 1 0 0 1 1-1h7a1 1 0 0 1 1 1v17" /><circle cx="11" cy="12" r=".9" fill="currentColor" stroke="none" /><path d="M17.5 12H23M20.5 9l3 3-3 3" /></svg>;
 
 export default function Shell({ children }) {
-  const [lang, setLang] = useState('th'), [s, setS] = useState({}), [me, setMe] = useState(undefined), [toasts, setToasts] = useState([]), [dbErr, setDbErr] = useState(false);
+  const [lang, setLang] = useState('th'), [s, setS] = useState({}), [me, setMe] = useState(undefined), [toasts, setToasts] = useState([]), [dbErr, setDbErr] = useState(false), [hv, setHv] = useState(undefined), [sk, setSk] = useState('');
   const path = usePathname(), t = L[lang], id = useRef(0);
 
   const toast = useCallback((msg, type = 'ok') => {
@@ -55,6 +89,7 @@ export default function Shell({ children }) {
   const logout = async () => { const { ok } = await api('logout', {}); if (ok) { setMe({ user: null }); toast(t.loggedOut, 'info'); } };
   const sw = l => { setLang(l); try { localStorage.setItem('lang', l); } catch {} };
 
+  useEffect(() => { fetch('/api/human', { cache: 'no-store' }).then(r => r.json()).then(j => { if (j.ok) setHv(true); else { setSk(j.sitekey || ''); setHv(false); } }).catch(() => setHv(true)); }, []); // เน็ตล่ม = ไม่ล็อกคนออก
   useEffect(() => { document.documentElement.dataset.lang = lang; document.documentElement.lang = lang; }, [lang]);
   useEffect(() => {
     let l = 'th'; try { l = localStorage.getItem('lang') || 'th'; } catch {}
@@ -68,8 +103,11 @@ export default function Shell({ children }) {
   }, [reload, toast]);
   useEffect(() => { fetch('/api/stats', { cache: 'no-store' }).then(r => r.json()).then(x => { if (x.dbError || x.error) setDbErr(true); else setS(x); }).catch(() => setDbErr(true)); }, [path, me?.user?.id]);
 
-  const hr = ['/', '/k/' + DEMO, '/admin'], tabs = t.tabs.map((x, i) => ({ x, href: hr[i], on: i === 0 ? path === '/' : path.startsWith(hr[i]) })).filter((_, i) => i < 2 || me?.admin);
+  const hr = ['/', '/getkey/' + DEMO, '/admin'], tabs = t.tabs.map((x, i) => ({ x, href: hr[i], on: i === 0 ? path === '/' : path.startsWith(hr[i]) })).filter((_, i) => i < 2 || me?.admin);
   const u = me?.user;
+
+  if (hv === undefined) return <div className="gate" />;
+  if (hv === false) return <Gate sitekey={sk} lang={lang} onOk={() => setHv(true)} />;
 
   return <Ctx.Provider value={{ lang, me, reload, api, toast, copy }}><div className="wrap">
     <header className="hd"><Link href="/" className="id"><span className="logo">{NAME[0]}</span><span><b>{NAME}</b><small>{t.sub} {NAME}</small></span></Link>

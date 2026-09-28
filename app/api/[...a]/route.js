@@ -10,6 +10,32 @@ const CORS = { 'Access-Control-Allow-Origin': '*', 'Access-Control-Allow-Methods
 const J = (o, s = 200) => R.json(o, { status: s, headers: CORS });
 const rnd = n => { const c = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'; return Array.from({ length: n }, () => c[crypto.randomInt(c.length)]).join(''); };
 const ses = async () => unsign((await cookies()).get('s')?.value || '');
+// แปลงค่าหมดอายุที่เก็บไว้ (ms ตามที่ mint() บันทึก) เป็น Unix timestamp วินาที; ถ้าเป็นวินาทีอยู่แล้ว (<1e11) ก็ใช้ตามนั้น
+const toUnix = v => { const n = Number(v); return Number.isFinite(n) && n > 0 ? Math.floor(n >= 1e11 ? n / 1000 : n) : 0; };
+const PRESETS = ['youtube', 'discord', 'tiktok', 'facebook', 'instagram', 'telegram', 'x', 'website'];
+const IMG_KINDS = ['logo', 'banner', 'i0', 'i1', 'i2', 'i3', 'i4', 'i5'], MAX_LINKS = 6, MAX_IMG = 420000; // MAX_IMG = ความยาว base64 (~300KB)
+// ตรวจรูปที่อัปโหลด: ต้องเป็น png/jpeg/webp จริง (เช็ก magic bytes) ไม่รับ svg เพื่อกัน XSS
+const imgOk = d => {
+  const m = /^data:(image\/(?:png|jpeg|webp));base64,([A-Za-z0-9+/]+={0,2})$/.exec(String(d || ''));
+  if (!m || m[2].length > MAX_IMG) return null;
+  const b = Buffer.from(m[2], 'base64'), t = m[1];
+  const ok = t === 'image/png' ? b.subarray(0, 4).toString('hex') === '89504e47' : t === 'image/jpeg' ? b.subarray(0, 3).toString('hex') === 'ffd8ff' : b.subarray(0, 4).toString() === 'RIFF' && b.subarray(8, 12).toString() === 'WEBP';
+  return ok ? { t, d: m[2] } : null;
+};
+const imgUrl = (slug, kind, v) => v?.[kind] ? `/api/img/${slug}/${kind}?v=${v[kind]}` : '';
+const wipeImgs = async slug => { try { await kv.del('imgv:' + slug, ...IMG_KINDS.map(k => `img:${slug}:${k}`)); } catch {} };
+// คีย์ของหน้านั้นๆ: เก็บเป็น set pk:slug (คีย์เก่าก่อนอัปเดตจะถูกดึงเข้า set ให้อัตโนมัติครั้งเดียว)
+async function ownKeys(slug) {
+  if (!await kv.get('pkfill:' + slug)) {
+    const ks = await kv.smembers('keys'), vs = ks.length ? await kv.mget(...ks.map(x => 'key:' + x)) : [];
+    const mine = ks.filter((x, i) => vs[i] && vs[i].page === slug);
+    if (mine.length) await kv.sadd('pk:' + slug, ...mine);
+    await kv.set('pkfill:' + slug, 1);
+  }
+  const ids = await kv.smembers('pk:' + slug), vs = ids.length ? await kv.mget(...ids.map(x => 'key:' + x)) : [];
+  const gone = ids.filter((_, i) => !vs[i]); if (gone.length) await kv.srem('pk:' + slug, ...gone);
+  return vs.filter(Boolean).sort((x, y) => y.exp - x.exp).slice(0, 300);
+}
 const live = k => !!k && !k.off && k.exp > Date.now();
 const safe = n => (typeof n === 'string' && /^\/($|[^/\\])/.test(n)) ? n : '/';
 const url = v => { try { const u = new URL(String(v || '').trim()); return /^https?:$/.test(u.protocol) ? u.toString() : ''; } catch { return ''; } };
@@ -51,15 +77,16 @@ async function mint(page, uid, hours, prefix) {
   const key = (clean(prefix, /[^A-Za-z0-9]/g, 12) || 'KEY') + '-' + rnd(7) + '-' + rnd(5), exp = Date.now() + hours * 36e5;
   await kv.set('key:' + key, { key, page, uid: String(uid), exp, off: 0 }, { ex: Math.ceil(hours * 3600) + 604800 });
   await kv.sadd('keys', key);
+  if (page && page !== 'bot' && page !== 'admin') await kv.sadd('pk:' + page, key);
   return { key, exp };
 }
 
 async function inner(req, { params }) {
-  const [a, b] = (await params).a, M = req.method;
+  const [a, b, c3] = (await params).a, M = req.method;
   if (M === 'OPTIONS') return J({});
   const body = M === 'POST' ? await req.json().catch(() => ({})) : {};
   const q = new URL(req.url).searchParams;
-  const ip = (req.headers.get('cf-connecting-ip') || req.headers.get('x-forwarded-for') || '').split(',')[0].trim();
+  const ip = (req.headers.get('x-forwarded-for') || '').split(',')[0].trim();
   const base = pickBase(req);
   const co = { path: '/', httpOnly: true, sameSite: 'lax', secure: base.startsWith('https') };
 
@@ -118,16 +145,43 @@ async function inner(req, { params }) {
   }
   if (a === 'logout') { const r = J({ ok: 1 }); r.cookies.delete('s'); r.cookies.delete('adm'); return r; }
 
+  // ---------- ตรวจบอตครั้งแรกที่เข้าเว็บ (Cloudflare Turnstile) ----------
+  if (a === 'human') {
+    const need = !!(E.TURNSTILE_SECRET && E.TURNSTILE_SITEKEY);
+    if (M === 'GET') return J({ ok: !need || !!unsign((await cookies()).get('hv')?.value || ''), sitekey: need ? E.TURNSTILE_SITEKEY : '' });
+    if (!need) return J({ ok: 1 });
+    if (!await ts(body.token)) return J({ ok: 0, error: 'captcha' }, 400);
+    const r = J({ ok: 1 });
+    r.cookies.set('hv', sign({ h: 1, e: Date.now() + WEEK }), { ...co, maxAge: 604800 });
+    return r;
+  }
+  // ---------- รูปของหน้า (เก็บใน KV, เสิร์ฟพร้อม cache ยาว; ?v= ใช้เปลี่ยน URL เมื่ออัปโหลดใหม่) ----------
+  if (a === 'img') {
+    const o = IMG_KINDS.includes(c3) ? await kv.get(`img:${b}:${c3}`) : null;
+    if (!o?.d) return J({ error: 'nf' }, 404);
+    return new Response(Buffer.from(o.d, 'base64'), { headers: { 'Content-Type': o.t, 'Cache-Control': 'public, max-age=31536000, immutable', 'X-Content-Type-Options': 'nosniff', 'Access-Control-Allow-Origin': '*' } });
+  }
+
   // ---------- public ----------
   if (a === 'me') {
     const s = await ses();
     if (!s) return J({ user: null });
     const out = { user: { id: s.id, name: s.name, avatar: s.avatar }, admin: isAdmin(s.id), creator: null, page: null, max: 72 };
-    try { const c = await kv.get('cr:' + s.id); out.creator = c || null; out.page = c ? (await kv.get('page:' + c.slug)) || null : null; out.max = (await kv.get('max')) || 72; } catch { out.dbError = true; }
+    try { const c = await kv.get('cr:' + s.id); out.creator = c || null; out.page = c ? (await kv.get('page:' + c.slug)) || null : null; out.max = (await kv.get('max')) || 72; out.imgv = c ? (await kv.get('imgv:' + c.slug)) || {} : {}; } catch { out.dbError = true; }
     return J(out);
   }
   if (a === 'stats') { try { const [keys, pages, creators, max] = await Promise.all([kv.scard('keys'), kv.scard('pages'), kv.scard('crs'), kv.get('max')]); return J({ keys, pages, creators, max: max || 72 }); } catch { return J({ dbError: true }); } }
-  if (a === 'verify') { const k = await kv.get('key:' + (q.get('key') || '-')); return J(live(k) ? { valid: true, expires: k.exp, remaining: Math.floor((k.exp - Date.now()) / 1000), page: k.page } : { valid: false }); }
+  if (a === 'verify') {
+    // อ่านวันหมดอายุจริงจากข้อมูลคีย์ใน KV (field "exp" = มิลลิวินาที) ห้ามสร้างใหม่ตอนตรวจ
+    const key = String(q.get('key') || '').trim();
+    if (!key || key.length > 80) return J({ valid: false, reason: 'missing' }, 400);
+    const k = await kv.get('key:' + key);
+    if (!k) return J({ valid: false, reason: 'not_found' }, 404);
+    const expiresAt = toUnix(k.exp); // Unix timestamp (วินาที, UTC) ของเวลาหมดอายุจริง
+    if (k.off) return J({ valid: false, reason: 'revoked' }, 403);
+    if (!expiresAt || expiresAt * 1000 <= Date.now()) return J({ valid: false, reason: 'expired' }, 410);
+    return J({ valid: true, expiresAt, remaining: expiresAt - Math.floor(Date.now() / 1000), serverTime: Math.floor(Date.now() / 1000), expires: k.exp, page: k.page });
+  }
 
   // ---------- bot ----------
   if (a === 'bot') {
@@ -145,6 +199,7 @@ async function inner(req, { params }) {
   if (a === 'page') {
     const p = await kv.get('page:' + b);
     if (!p) return J({ error: 'nf' }, 404);
+    const iv = (await kv.get('imgv:' + b)) || {};
     const s = await ses();
     let st = null, k = null;
     if (s) {
@@ -153,7 +208,7 @@ async function inner(req, { params }) {
       if (old) { const kk = await kv.get('key:' + old); if (live(kk)) k = kk; }
     }
     const step = st?.step || 0, left = (step === 1 || step === 2) ? Math.max(0, Math.ceil((st.t + p.wait * 1000 - Date.now()) / 1000)) : 0;
-    return J({ title: p.title, wait: p.wait, hours: p.hours, step, left, key: k ? { key: k.key, exp: k.exp } : null, sitekey: E.TURNSTILE_SITEKEY || '', user: s?.name || null });
+    return J({ title: p.title, desc: p.desc || '', logo: imgUrl(b, 'logo', iv), banner: imgUrl(b, 'banner', iv), links: (p.links || []).map(l => ({ label: l.label, url: l.url, icon: l.icon, img: l.icon === 'img' ? imgUrl(b, 'i' + l.slot, iv) : '' })), wait: p.wait, hours: p.hours, step, left, key: k ? { key: k.key, exp: k.exp } : null, sitekey: E.TURNSTILE_SITEKEY || '', user: s?.name || null });
   }
   if (a === 'gate' && M === 'POST') {
     const s = await ses(), p = await kv.get('page:' + b);
@@ -188,11 +243,49 @@ async function inner(req, { params }) {
   if (a === 'creator' && M === 'POST') {
     const s = await ses(), c = s && await kv.get('cr:' + s.id);
     if (!c) return J({ error: 'not_approved' }, 403);
+    const A = body.act;
+    // จัดการคีย์ของหน้าตัวเองเท่านั้น (เช็กว่าคีย์เป็นของ slug นี้)
+    if (A === 'keys') return J({ keys: await ownKeys(c.slug), now: Date.now() });
+    if (A === 'keyoff' || A === 'keydel') {
+      const k = await kv.get('key:' + body.key);
+      if (!k || k.page !== c.slug) return J({ error: 'nf' }, 404);
+      if (A === 'keydel') { await kv.del('key:' + body.key); await kv.srem('keys', body.key); await kv.srem('pk:' + c.slug, body.key); return J({ ok: 1 }); }
+      await kv.set('key:' + body.key, { ...k, off: k.off ? 0 : 1 }, { ex: Math.max(60, Math.ceil((k.exp - Date.now()) / 1000) + 604800) });
+      return J({ ok: 1, off: k.off ? 0 : 1 });
+    }
+    if (A === 'purge') {
+      const mine = await ownKeys(c.slug), dead = mine.filter(k => k.exp <= Date.now() || k.off).map(k => k.key);
+      for (const x of dead) await kv.del('key:' + x);
+      if (dead.length) { await kv.srem('keys', ...dead); await kv.srem('pk:' + c.slug, ...dead); }
+      return J({ ok: 1, n: dead.length });
+    }
+    if (A === 'img') {
+      if (!IMG_KINDS.includes(body.kind)) return J({ error: 'kind' }, 400);
+      const im = imgOk(body.data); if (!im) return J({ error: 'img' }, 400);
+      const v = (await kv.get('imgv:' + c.slug)) || {}, t = Date.now();
+      await kv.set(`img:${c.slug}:${body.kind}`, im); await kv.set('imgv:' + c.slug, { ...v, [body.kind]: t });
+      return J({ ok: 1, v: t });
+    }
+    if (A === 'imgdel') {
+      if (!IMG_KINDS.includes(body.kind)) return J({ error: 'kind' }, 400);
+      const v = (await kv.get('imgv:' + c.slug)) || {}; delete v[body.kind];
+      await kv.del(`img:${c.slug}:${body.kind}`); await kv.set('imgv:' + c.slug, v);
+      return J({ ok: 1 });
+    }
+    // บันทึกหน้า
     const yt = body.yt ? url(body.yt) : '', dc = body.dc ? url(body.dc) : '';
     if (body.yt && !yt) return J({ error: 'yt' }, 400);
     if (body.dc && !dc) return J({ error: 'dc' }, 400);
+    const links = [], used = new Set();
+    for (const l of (Array.isArray(body.links) ? body.links : []).slice(0, MAX_LINKS)) {
+      const slot = Math.floor(+l?.slot), u = url(l?.url), label = String(l?.label || '').trim().slice(0, 24);
+      if (!(slot >= 0 && slot < MAX_LINKS) || used.has(slot) || (!label && !l?.url)) continue; // ข้ามแถวว่าง
+      if (!u) return J({ error: 'link' }, 400);
+      used.add(slot);
+      links.push({ slot, label: label || new URL(u).hostname, url: u, icon: PRESETS.includes(l.icon) || l.icon === 'img' ? l.icon : 'website' });
+    }
     const max = (await kv.get('max')) || 72;
-    await kv.set('page:' + c.slug, { slug: c.slug, owner: s.id, prefix: c.prefix, title: String(body.title || c.slug).trim().slice(0, 60) || c.slug, yt, dc, wait: clamp(body.wait, 10, 120), hours: clamp(body.hours, 1, max), off: 0 });
+    await kv.set('page:' + c.slug, { slug: c.slug, owner: s.id, prefix: c.prefix, title: String(body.title || c.slug).trim().slice(0, 60) || c.slug, desc: String(body.desc || '').trim().slice(0, 140), yt, dc, links, wait: clamp(body.wait, 10, 120), hours: clamp(body.hours, 1, max), off: 0 });
     await kv.sadd('pages', c.slug);
     return J({ ok: 1, max });
   }
@@ -207,9 +300,12 @@ async function inner(req, { params }) {
       const get = async (pre, arr) => arr.length ? await kv.mget(...arr.map(x => pre + x)) : [];
       const [keyv, pagev, crv] = await Promise.all([get('key:', ks), get('page:', ps), get('cr:', cs.map(unbk))]);
       const gone = ks.filter((_, i) => !keyv[i]); if (gone.length) await kv.srem('keys', ...gone); // เก็บกวาดคีย์ที่หมดอายุและถูกลบแล้ว
+      const now = Date.now(), all = keyv.filter(Boolean);
       return J({
         max: max || 72,
-        keys: keyv.filter(Boolean).sort((x, y) => y.exp - x.exp),
+        now,
+        summary: { total: all.length, active: all.filter(k => live(k)).length, expired: all.filter(k => k.exp <= now).length, revoked: all.filter(k => k.off && k.exp > now).length },
+        keys: all.sort((x, y) => y.exp - x.exp).map(k => ({ ...k, expiresAt: toUnix(k.exp) })),
         pages: pagev.filter(Boolean),
         creators: crv.filter(Boolean),
         bans: bs.map(unbk),
@@ -219,7 +315,25 @@ async function inner(req, { params }) {
     const A = body.act;
     if (A === 'gen') return J(await mint('admin', s.id, body.hours, body.prefix));
     if (A === 'keyoff') { const k = await kv.get('key:' + body.key); if (!k) return J({ error: 'nf' }, 404); await kv.set('key:' + body.key, { ...k, off: k.off ? 0 : 1 }, { ex: Math.max(60, Math.ceil((k.exp - Date.now()) / 1000) + 604800) }); return J({ ok: 1, off: k.off ? 0 : 1 }); }
-    if (A === 'keydel') { await kv.del('key:' + body.key); await kv.srem('keys', body.key); return J({ ok: 1 }); }
+    if (A === 'extend') { // เพิ่มเวลาให้คีย์ที่มีอยู่ (นับต่อจากวันหมดอายุเดิม ถ้ายังไม่หมด / นับจากตอนนี้ถ้าหมดแล้ว)
+      const k = await kv.get('key:' + body.key); if (!k) return J({ error: 'nf' }, 404);
+      const hrs = clamp(body.hours, 1, 8760), exp = Math.max(k.exp, Date.now()) + hrs * 36e5;
+      await kv.set('key:' + body.key, { ...k, exp }, { ex: Math.ceil((exp - Date.now()) / 1000) + 604800 });
+      return J({ ok: 1, exp, expiresAt: toUnix(exp) });
+    }
+    if (A === 'bulkgen') { // สร้างหลายคีย์พร้อมกัน (สูงสุด 50)
+      const n = clamp(body.count, 1, 50), keys = [];
+      for (let i = 0; i < n; i++) keys.push((await mint('admin', s.id, body.hours, body.prefix)).key);
+      return J({ ok: 1, keys });
+    }
+    if (A === 'purge') { // ลบคีย์ที่หมดอายุ/ถูกระงับทั้งหมด
+      const ks = await kv.smembers('keys'), vs = ks.length ? await kv.mget(...ks.map(x => 'key:' + x)) : [];
+      const dead = ks.filter((x, i) => !vs[i] || vs[i].exp <= Date.now() || vs[i].off);
+      for (const x of dead) await kv.del('key:' + x);
+      if (dead.length) await kv.srem('keys', ...dead);
+      return J({ ok: 1, n: dead.length });
+    }
+    if (A === 'keydel') { const k0 = await kv.get('key:' + body.key); await kv.del('key:' + body.key); await kv.srem('keys', body.key); if (k0?.page) await kv.srem('pk:' + k0.page, body.key); return J({ ok: 1 }); }
     if (A === 'approve') {
       const id = clean(body.id, /\D/g, 25), slug = String(body.slug || '').trim().toLowerCase(), prefix = clean(body.prefix, /[^A-Za-z0-9]/g, 12) || 'KEY';
       if (id.length < 5) return J({ error: 'id' }, 400);
@@ -230,7 +344,7 @@ async function inner(req, { params }) {
       return J({ ok: 1 });
     }
     if (A === 'unapprove') { const id = clean(body.id, /\D/g, 25); await kv.del('cr:' + id); await kv.srem('crs', 'id:' + id); return J({ ok: 1 }); }
-    if (A === 'pagedel') { await kv.del('page:' + body.slug); await kv.srem('pages', body.slug); return J({ ok: 1 }); }
+    if (A === 'pagedel') { await kv.del('page:' + body.slug); await kv.srem('pages', body.slug); await wipeImgs(String(body.slug)); return J({ ok: 1 }); }
     if (A === 'ban') { const id = String(body.id || '').trim(); if (!id) return J({ error: 'id' }, 400); await kv.sadd('bans', bk(id)); return J({ ok: 1 }); }
     if (A === 'unban') { await kv.srem('bans', bk(String(body.id || '').trim())); return J({ ok: 1 }); }
     if (A === 'max') { await kv.set('max', clamp(body.hours, 1, 8760)); return J({ ok: 1 }); }

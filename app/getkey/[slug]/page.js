@@ -1,13 +1,14 @@
 'use client';
 import { useCallback, useEffect, useRef, useState, use } from 'react';
 import { useApp } from '../../Shell';
+import { Icon } from '../../icons';
 
 const T = {
-  th: { start: 'เริ่ม Get Key', yt: 'ไปที่ Discord', dc: 'ยืนยันว่าไม่ใช่บอท', claim: 'รับคีย์', wait: 'รอ', login: 'ล็อกอินด้วย Discord', exp: 'หมดอายุ', hrs: 'ชม.', copy: 'คัดลอกคีย์', nf: 'ไม่พบหน้านี้', load: 'กำลังโหลด…', busy: 'กำลังทำงาน…',
+  th: { start: 'เริ่ม Get Key', yt: 'ไปที่ Discord', dc: 'ยืนยันว่าไม่ใช่บอท', claim: 'รับคีย์', wait: 'รอ', login: 'ล็อกอินด้วย Discord', exp: 'หมดอายุ', hrs: 'ชม.', copy: 'คัดลอกคีย์', human: 'ยืนยันตัวตน', nf: 'ไม่พบหน้านี้', load: 'กำลังโหลด…', busy: 'กำลังทำงาน…',
     hint: ['กด "เริ่ม" เพื่อเปิด YouTube แล้วกดติดตามช่อง', 'ติดตามยูทูปแล้วรอให้เวลาครบ จากนั้นไปขั้นต่อไป', 'เข้า Discord แล้วยืนยัน captcha', 'ครบทุกขั้นตอนแล้ว กดรับคีย์ได้เลย'],
     ok1: 'เปิด YouTube แล้ว รอเวลาให้ครบ', ok2: 'เปิด Discord แล้ว รอเวลาแล้วยืนยัน captcha', ok3: 'ยืนยันสำเร็จ กดรับคีย์ได้เลย', got: 'ได้รับคีย์แล้ว!',
     errs: { server: 'ฐานข้อมูลมีปัญหา ดูป้ายเตือนด้านบน', auth: 'กรุณาเข้าสู่ระบบก่อน', banned: 'บัญชี/IP นี้ถูกแบน', wait: 'ยังไม่ครบเวลารอ', captcha: 'ยืนยัน captcha ไม่ผ่าน ลองอีกครั้ง', steps: 'ทำขั้นตอนไม่ครบ', nf: 'ไม่พบหน้านี้', act: 'คำสั่งไม่ถูกต้อง', x: 'เกิดข้อผิดพลาด ลองใหม่อีกครั้ง' } },
-  en: { start: 'Get Key', yt: 'Go to Discord', dc: 'Verify you are human', claim: 'Claim key', wait: 'Wait', login: 'Log in with Discord', exp: 'Expires', hrs: 'h', copy: 'Copy key', nf: 'Page not found', load: 'Loading…', busy: 'Working…',
+  en: { start: 'Get Key', yt: 'Go to Discord', dc: 'Verify you are human', claim: 'Claim key', wait: 'Wait', login: 'Log in with Discord', exp: 'Expires', hrs: 'h', copy: 'Copy key', human: 'Verify', nf: 'Page not found', load: 'Loading…', busy: 'Working…',
     hint: ['Press "Get Key" to open YouTube and follow the channel', 'Follow on YouTube, wait for the timer, then continue', 'Join the Discord and verify the captcha', 'All steps done, claim your key'],
     ok1: 'YouTube opened, wait for the timer', ok2: 'Discord opened, wait then verify the captcha', ok3: 'Verified, you can claim your key', got: 'Key claimed!',
     errs: { auth: 'Please log in first', banned: 'This account/IP is banned', wait: 'Timer not finished yet', captcha: 'Captcha failed, try again', steps: 'Steps not completed', nf: 'Page not found', act: 'Invalid action', x: 'Something went wrong, try again' } },
@@ -64,10 +65,14 @@ export default function K({ params }) {
   };
 
   const label = busy ? t.busy : st === 0 ? t.start : st === 1 ? (left ? `${t.wait} ${left}s` : t.yt) : (left ? `${t.wait} ${left}s` : t.dc);
-  return <main><h1>{d.title}</h1>
-    {!d.user ? <div className="box"><p>{t.hint[0]}</p><a className="b" href={'/api/login?next=' + encodeURIComponent('/k/' + slug)}>{t.login}</a></div>
+  const chips = [['youtube', 'YouTube'], ['discord', 'Discord'], ['shield', t.human]];
+  return <main className="gk">
+    <div className="hero">{d.banner ? <img className="bn" src={d.banner} alt="" /> : <div className="bn ph" />}
+      <div className="hd2">{d.logo ? <img className="lg" src={d.logo} alt="" /> : <span className="lg ph">{(d.title || '?')[0]}</span>}<div><h1>{d.title}</h1>{d.desc && <p>{d.desc}</p>}</div></div></div>
+    {d.links?.length > 0 && <div className="lks">{d.links.map((l, i) => <a key={i} className="lk" href={l.url} target="_blank" rel="noopener noreferrer nofollow">{l.icon === 'img' && l.img ? <img src={l.img} alt="" width="26" height="26" /> : <Icon name={l.icon === 'img' ? 'website' : l.icon} size={26} />}<span>{l.label}</span></a>)}</div>}
+    {!d.user ? <div className="box"><p>{t.hint[0]}</p><a className="b" href={'/api/login?next=' + encodeURIComponent('/getkey/' + slug)}>{t.login}</a></div>
       : d.key ? <div className="box"><div className="steps">{[0, 1, 2].map(i => <i key={i} className="d" />)}</div><div className="key">{d.key.key}</div><p>{t.exp}: {new Date(d.key.exp).toLocaleString()}</p><button onClick={() => copy(d.key.key)}>{t.copy}</button></div>
-        : <div className="box"><div className="steps">{[0, 1, 2].map(i => <i key={i} className={st > i ? 'd' : ''} />)}</div>
+        : <div className="box"><div className="chips">{chips.map(([ic, n], i) => <span key={i} className={'chip' + (st > i ? ' d' : st === i ? ' on' : '')}>{ic === 'shield' ? <b>✓</b> : <Icon name={ic} size={18} />}{n}</span>)}</div><div className="steps">{[0, 1, 2].map(i => <i key={i} className={st > i ? 'd' : ''} />)}</div>
           {st === 2 && sk && <div ref={box} style={{ marginBottom: 12 }} />}
           {st === 3 ? <button disabled={busy} onClick={() => post({ act: 'claim' })}>{busy ? t.busy : `${t.claim} (${d.hours}${t.hrs})`}</button>
             : <button disabled={busy || !ready} onClick={() => post({ act: 'go', token: tok })}>{label}</button>}

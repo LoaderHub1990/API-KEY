@@ -23,11 +23,20 @@ Discord Developer Portal → OAuth2 → Redirects: `BASE_URL/api/callback` (scop
 
 ## การใช้งาน
 - **แอดมิน**: ล็อกอิน Discord ด้วยบัญชีที่อยู่ใน `ADMIN_IDS` → แท็บ "แอดมิน" จะโผล่ขึ้นมาเอง
-- **ผู้สร้างหน้า**: ล็อกอิน → คัดลอก Discord ID ส่งให้แอดมิน → แอดมินอนุมัติพร้อมกำหนด slug → กรอกฟอร์มบันทึก → ลิงก์ `/k/slug`
+- **ผู้สร้างหน้า**: ล็อกอิน → คัดลอก Discord ID ส่งให้แอดมิน → แอดมินอนุมัติพร้อมกำหนด slug → กรอกฟอร์มบันทึก → ลิงก์ `/getkey/slug`
 - **ออกจากระบบ**: ปุ่มรูปประตูข้างโปรไฟล์มุมขวาบน
 
+## ฟีเจอร์ผู้สร้างหน้า (ล่าสุด)
+- ลิงก์หน้าแจกคีย์: `/getkey/slug` (ลิงก์เก่า `/k/slug` redirect ให้อัตโนมัติ)
+- แผงผู้สร้างหน้าอัปโหลดโลโก้ / แบนเนอร์ / รูปไอคอนของลิงก์เพิ่มเติมได้ (ย่อรูปอัตโนมัติ เก็บใน KV) และเพิ่มลิงก์ของตัวเองได้สูงสุด 6 ปุ่ม
+- ผู้สร้างหน้าที่แอดมินอนุมัติ ระงับ/เปิดใช้/ลบคีย์ของหน้าตัวเองได้ (แตะคีย์หน้าอื่นไม่ได้)
+- เข้าเว็บครั้งแรกจะมีหน้าตรวจบอต (Turnstile) ต้องตั้ง `TURNSTILE_SITEKEY` + `TURNSTILE_SECRET` ถ้าไม่ตั้งจะข้าม · จำผลไว้ 7 วัน · ไม่กระทบ `/api/verify`
+
 ## API
-- ตรวจคีย์: `GET /api/verify?key=XXX` → `{valid, expires, remaining, page}`
+- ตรวจคีย์: `GET /api/verify?key=XXX`
+  - ถูกต้อง (200): `{valid:true, expiresAt, remaining, serverTime, expires, page}` — `expiresAt` = **Unix timestamp วินาที (UTC)** ของเวลาหมดอายุจริง อ่านจากคีย์ที่เก็บไว้ ไม่สร้างใหม่ตอนตรวจ (`expires` = ค่าเดิมเป็น ms คงไว้เพื่อความเข้ากันได้)
+  - ไม่ถูกต้อง: `{valid:false, reason}` — 400 `missing` · 404 `not_found` · 403 `revoked` · 410 `expired`
+  - Roblox: ดู `roblox/KeyTimer.lua` (Remaining = expiresAt - os.time())
 - บอท: `POST /api/bot` header `Authorization: Bearer BOT_SECRET`, body `{act: gen|revoke|ban|unban|check, ...}`
   - `gen {hours,prefix,uid}` → `{key,exp}` · `revoke {key}` · `ban/unban {id}` · `check {key}`
 
