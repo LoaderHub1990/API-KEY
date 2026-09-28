@@ -1,8 +1,0 @@
-/* ---- bot check gate (เลย์เอาต์เหมือนหน้า interstitial ของ Cloudflare) ---- */
-.gate{position:fixed;inset:0;z-index:200;background:#fff;color:#222;overflow:auto;font-family:Inter,system-ui,'Noto Sans Thai',sans-serif}
-.gate-in{max-width:1000px;margin:0 auto;padding:clamp(60px,14vh,140px) 24px 40px}
-.gate h1{font-size:clamp(1.8rem,5vw,2.6rem);margin:0 0 8px;font-weight:600;word-break:break-all}.gate h2{font-size:1.5rem;margin:0 0 8px}.gate p{color:#444;margin:0 0 26px}
-.gate-box{min-height:66px}.gate-msg{margin:14px 0 0!important;color:#b42318!important;font-size:.9rem}
-.gate-ft{border-top:1px solid #ddd;margin-top:min(38vh,320px);padding-top:16px;text-align:center;font-size:.78rem;color:#666}
-
-.gate:empty{background:#07080d}
